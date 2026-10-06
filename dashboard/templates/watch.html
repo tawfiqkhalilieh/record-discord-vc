@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block title %}{{ recording.channel_name }} · VC Stash{% endblock %}
+{% block content %}
+<a class="muted" href="/">← All recordings</a><h1>{{ recording.channel_name }}</h1>
+<p class="muted">{{ recording.started_at[:19]|replace('T', ' ') }} UTC · {{ (recording.duration_seconds / 60)|round(1) }} min</p>
+<video controls preload="metadata" src="/recordings/{{ recording.id }}/video" aria-label="Recorded voice call"></video>
+<div class="watch-details"><p>{{ recording.participants|join(' · ') }}</p><a class="button" href="/recordings/{{ recording.id }}/video?download=true">Download MP4</a></div>
+{% endblock %}

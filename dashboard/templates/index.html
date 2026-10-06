@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block content %}
+<p class="eyebrow">THE LIBRARY</p><h1>Recordings <span class="count">{{ recordings|length }}</span></h1>
+<p class="muted">Finished calls and shared moments. New videos appear after processing.</p>
+<div class="library">
+  {% for r in recordings %}
+  <article class="panel recording">
+    <div class="icon" aria-hidden="true">▶</div>
+    <div><h2><a href="/recordings/{{ r.id }}">{{ r.channel_name }}</a></h2>
+      <p class="muted"><time>{{ r.started_at[:19]|replace('T', ' ') }} UTC</time> · {{ (r.duration_seconds / 60)|round(1) }} min · {{ (r.size_bytes / 1048576)|round(1) }} MB</p>
+      <p class="participants">{{ r.participants|join(' · ') }}</p>
+    </div><a class="button secondary" href="/recordings/{{ r.id }}">Watch recording</a>
+  </article>
+  {% else %}
+  <section class="panel empty"><h2>No recordings yet</h2><p class="muted">Start a call with /record start, or publish the included grid demo.</p></section>
+  {% endfor %}
+</div>
+{% endblock %}

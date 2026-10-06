@@ -1,0 +1,99 @@
+name: discord-vc-stash
+x-storage: &storage
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+  S3_BUCKET: ${S3_BUCKET:-recordings}
+  S3_REGION: ${S3_REGION:-us-east-1}
+services:
+  minio:
+    build: ./infra/minio
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    ports:
+      - '127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001'
+    restart: unless-stopped
+  bucket-init:
+    build: .
+    depends_on:
+      - minio
+    environment:
+      <<: *storage
+    command: ['python', '-m', 'shared.init_bucket']
+  capture:
+    build:
+      context: .
+      dockerfile: capture/Dockerfile
+    init: true
+    shm_size: 1gb
+    environment:
+      <<: *storage
+      RECORDER_API_KEY: ${RECORDER_API_KEY:?Set RECORDER_API_KEY}
+      VNC_PASSWORD: ${VNC_PASSWORD:?Set VNC_PASSWORD}
+      RECORDER_USER_ID: ${RECORDER_USER_ID:-}
+      CAPTURE_WIDTH: ${CAPTURE_WIDTH:-1280}
+      CAPTURE_HEIGHT: ${CAPTURE_HEIGHT:-720}
+      CAPTURE_FPS: ${CAPTURE_FPS:-30}
+      CAPTURE_VIDEO_SELECTOR: ${CAPTURE_VIDEO_SELECTOR:-video}
+      CAPTURE_NAME_SELECTOR: ${CAPTURE_NAME_SELECTOR:-}
+      MAX_RECORDING_SECONDS: ${MAX_RECORDING_SECONDS:-14400}
+      DATA_DIR: /data
+      DISPLAY: ':99'
+      PULSE_SERVER: unix:/tmp/pulse/native
+    ports:
+      - '127.0.0.1:${NOVNC_PORT:-6080}:6080'
+    volumes:
+      - capture-data:/data
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    stop_grace_period: 90s
+    restart: unless-stopped
+  dashboard:
+    build: .
+    environment:
+      <<: *storage
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+    ports:
+      - '${BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_PORT:-3000}:3000'
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+  bot:
+    profiles: ['discord']
+    build: ./bot
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+      RECORD_ROLE_ID: ${RECORD_ROLE_ID:-}
+      RECORDER_USER_ID: ${RECORDER_USER_ID:-}
+      RECORDER_URL: http://capture:8000
+      RECORDER_API_KEY: ${RECORDER_API_KEY:?Set RECORDER_API_KEY}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+    depends_on:
+      capture:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  minio-data:
+  capture-data:
