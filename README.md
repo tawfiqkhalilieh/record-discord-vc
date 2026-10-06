@@ -1,6 +1,6 @@
 # Discord VC Stash
 
-A self-hosted voice-call recording system: a Discord command bot, an operator-joined Chromium capture worker, dynamic video grids, FFmpeg encoding, private MinIO storage, and a password-protected recording library.
+A self-hosted voice-call live streaming and recording system: a Discord command bot, an operator-joined Chromium capture worker, dynamic video grids, FFmpeg encoding, private MinIO storage, and a password-protected recording library.
 
 **Capture requires an operator.** Discord's bot API does not provide the supported video reception this system needs. [Discord prohibits automated normal-user accounts](https://support.discord.com/hc/en-us/articles/115002192352-Automated-User-Accounts-Self-Bots). This implementation never logs in or joins a call automatically: a human signs in, joins, and selects streams through noVNC. `/record start` and `/record end` control local capture after that setup. The command bot itself does not join the VC; audio and video come from the browser.
 
@@ -12,9 +12,10 @@ VC side chat: /record start | /record end
     → capture/ (internal authenticated FastAPI API)
         → Chromium on Xvfb/Openbox, manually joined call
         → canvas grid: loaded video elements + participant names/voice-only tiles
-        → FFmpeg x11grab + PulseAudio monitor → H.264/AAC MKV → MP4
+        → FFmpeg x11grab + PulseAudio monitor → H.264/AAC → live HLS + MKV → MP4
     → shared/storage.py → MinIO: private MP4 + JSON metadata
-    → dashboard/ → admin session → library + authenticated, seekable playback
+    → dashboard/ → live preview + session-scoped OBS Browser Source
+        → admin session → library + authenticated, seekable playback
 ```
 
 `pipeline/` also provides an independent FFmpeg compositor for time-aligned participant streams. `tests/` covers commands, capture guards, live canvas changes, real FFmpeg output, storage, authentication, and playback. This version runs **one recording or processing job at a time**, with up to **16 tiles** at 1280×720 / 30 fps by default. Cameras and shares are separate tiles; voice-only members get name/initial tiles. No privileged Discord intents are needed.
@@ -92,10 +93,25 @@ Command definitions follow [Discord's application command API](https://docs.disc
 docker compose exec capture python -m capture.control arm GUILD_ID CHANNEL_ID
 ```
 
-6. A permitted member joins that same VC and runs **`/record start` in its side chat**. The worker replaces its display with a composited canvas, and the bot posts a recording notice. Make sure participants know the call is being recorded before starting.
+6. A permitted member joins that same VC and runs **`/record start` in its side chat**. The worker replaces its display with a composited canvas, starts the dashboard live stream, and the bot posts a recording/live streaming notice. Make sure participants know the call is being recorded before starting.
 7. Run **`/record end` in the same VC side chat**. The bot confirms processing has been queued and provides the stash link. Refresh it after upload finishes. Login is required for both viewing and downloading.
 
 Arming is consumed by each start; re-arm before the next recording. The recording stops automatically after `MAX_RECORDING_SECONDS` (four hours by default). Another channel cannot stop the current channel's recording. Processing blocks the next recording until the job completes or fails.
+
+### Watch live and use OBS
+
+After `/record start`, the dashboard automatically shows the active call, including the changing participant grid and mixed call audio. The worker encodes the canvas directly during capture and publishes two-second HLS segments; viewers do not wait for `/record end` or upload. Expect roughly 4–8 seconds of buffering, depending on network and playback. This is live HLS, rather than subsecond WebRTC. The dashboard preview starts muted; unmute with the video controls.
+
+For OBS:
+
+1. Open the dashboard while capture is running and copy **OBS Browser Source URL**.
+2. In OBS, add a **Browser Source** and paste the URL. Set its width and height to `CAPTURE_WIDTH` / `CAPTURE_HEIGHT` (1280×720 by default).
+3. Enable **Control audio via OBS** to send the call's audio to your OBS mixer. The source page plays unmuted and fills the source area with the video grid. See [OBS Browser Source documentation](https://obsproject.com/kb/browser-source).
+4. Use your normal OBS streaming output configuration to broadcast the scene.
+
+`PUBLIC_BASE_URL` must point to the dashboard address reachable from the OBS machine. Each source URL contains a signed credential scoped to that call. Treat it as private: it grants viewing without the admin login, cannot list/download the library, and stops serving media when the call ends. Copy the new URL for each new call. The recorder API key stays server-side; the dashboard proxies live media over the internal Docker network, without exposing capture ports or MinIO objects.
+
+HLS playback uses a locally vendored hls.js 1.6.16 (Apache-2.0, license in `dashboard/static/vendor/hls.LICENSE`) on browsers with MediaSource, with native HLS as fallback. The rolling playlist retains six segments plus a small deletion grace window, so live output disk usage is bounded. Raw archives remain available for recovery under the existing retention behavior. The same FFmpeg encoder writes live output and the MKV archive; ending the call still remuxes and uploads the saved MP4. The independent file-based `pipeline.composite` remains available for offline rebuilds.
 
 ### Capture boundaries
 
@@ -206,4 +222,14 @@ docker compose exec capture python /tmp/live_smoke.py
 
 Validated on 2026-10-06: all service images built, 22 Python tests and 3 bot tests passed, and the container smoke test recorded a clean **2 → 3 → 2** grid with audible loopback audio and uploaded it to MinIO. Admin login, real S3 metadata listing, HTTP range playback, and HTML5 seeking were also verified. Real Discord registration and call capture require your credentials and operator setup and were not exercised in these checks.
 
-To run the dashboard directly, export `.env` values plus `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and an accessible `S3_ENDPOINT`, then run `uvicorn dashboard.app:app --port 3000`. The capture worker additionally needs Xvfb, PulseAudio, and its display setup; use its Docker service for that environment.
+To run the dashboard directly, export `.env` values plus `S3_ACCESS_KEY`, `S3_SECRET_KEY`, and an accessible `S3_ENDPOINT`, set `RECORDER_URL` to the accessible capture API address and `RECORDER_API_KEY` to the worker’s key for live playback, then run `uvicorn dashboard.app:app --port 3000`. The capture worker additionally needs Xvfb, PulseAudio, and its display setup; use its Docker service for that environment.
+
+### Preview live playback without Discord
+
+With `requirements-dev.txt` installed and FFmpeg available, run:
+
+```bash
+python -m pipeline.live_demo --port 3000
+```
+
+Open <http://localhost:3000> and sign in with `live-demo-password`. This development-only demo loops the synthetic changing grid through real FFmpeg live HLS output, the capture API, and the dashboard proxy. You can also copy its OBS Browser Source URL. S3 storage is isolated in memory with moto; no production storage or Discord account is used. The live output lasts up to four hours, and temporary media is removed on shutdown. Use `--host 0.0.0.0` only when you need access from another machine, and set `PUBLIC_BASE_URL` to its reachable address in the demo environment if using OBS remotely.

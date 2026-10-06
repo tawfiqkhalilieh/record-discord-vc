@@ -16,3 +16,11 @@ button:hover, .button:hover { background: #4f46e5; color: white; } .secondary { 
 .login button { width: 100%; margin-top: 20px; } .error { color: #fda4af; } video { width: 100%; max-height: 70vh; background: black; border-radius: 12px; margin-top: 20px; }
 .watch-details { display: flex; align-items: center; justify-content: space-between; gap: 20px; } :focus-visible { outline: 2px solid #a5b4fc; outline-offset: 4px; }
 @media (max-width: 680px) { header { padding: 18px; gap: 12px; } header span { display: none; } main { padding: 32px 18px; } .recording { flex-wrap: wrap; gap: 16px; padding: 20px; } .recording > .button { margin-left: 0; width: 100%; text-align: center; } .watch-details { align-items: start; flex-direction: column; } }
+
+[hidden] { display: none !important; }
+#obs-url { width: 100%; padding: 12px; border: 1px solid #475569; border-radius: 8px; background: #0b1020; color: #fff; font: inherit; }
+.live-panel { margin-bottom: 40px; }
+.obs-source { background: #000; overflow: hidden; }
+.obs-source #live-video { width: 100vw; height: 100vh; max-height: none; margin: 0; border-radius: 0; object-fit: contain; }
+.obs-source #live-status { position: absolute; bottom: 12px; left: 20px; color: #fff; }
+.obs-source #live-status:empty { display: none; }

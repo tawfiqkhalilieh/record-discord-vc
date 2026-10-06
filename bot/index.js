@@ -58,8 +58,8 @@ client.on(Events.InteractionCreate, async interaction => {
         channel_name: interaction.channel.name, requested_by: interaction.user.id,
         participants: roster(interaction.channel),
       });
-      await interaction.editReply(`Recording started. ID: ${session.id}`);
-      await interaction.followUp({ content: '🔴 Recording has started. Received webcams, watched screenshares, and call audio are being saved.', allowedMentions: { parse: [] } });
+      await interaction.editReply(`Recording and live stream started. Dashboard: ${(env.PUBLIC_BASE_URL || 'http://localhost:3000').replace(/\/$/, '')}/ · ID: ${session.id}`);
+      await interaction.followUp({ content: '🔴 Recording and live streaming have started. Received webcams, watched screenshares, and call audio are being streamed to the private dashboard and saved.', allowedMentions: { parse: [] } });
     } else {
       const session = await api('/end', 'POST', { guild_id: interaction.guildId, channel_id: interaction.channelId });
       const link = `${(env.PUBLIC_BASE_URL || 'http://localhost:3000').replace(/\/$/, '')}/recordings/${session.id}`;

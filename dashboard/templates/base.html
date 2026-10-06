@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header><a class="brand" href="/">◉ VC Stash</a><span>Private recording library</span>
+  <header><a class="brand" href="/">◉ VC Stash</a><span>Live calls & recordings</span>
     {% if request.session.get('admin') %}
     <form method="post" action="/logout"><input type="hidden" name="token" value="{{ request.session.csrf }}"><button class="secondary">Sign out</button></form>
     {% endif %}

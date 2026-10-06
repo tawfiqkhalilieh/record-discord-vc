@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import signal
 import uuid
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 
@@ -192,14 +194,14 @@ class Recorder:
             self.save(session)
             folder = self.folder(session["id"])
             self.log_handle = (folder / "ffmpeg.log").open("wb")
+            (folder / "live").mkdir()
             command = ["ffmpeg", "-y", "-nostdin", "-v", "warning", "-thread_queue_size", "1024",
                        "-f", "x11grab", "-draw_mouse", "0", "-video_size", f"{self.width}x{self.height}", "-framerate", str(self.fps),
                        "-i", os.environ.get("DISPLAY", ":99") + ".0+0,0", "-thread_queue_size", "1024",
                        "-f", "pulse", "-i", "recording.monitor", "-c:v", "libx264", "-preset", "veryfast",
-                       "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                       "-af", "aresample=async=1:first_pts=0", "-t", str(self.max_seconds), str(folder / "raw.mkv")]
+                       *live_encoding_options(self.fps, self.max_seconds)]
             try:
-                self.process = await asyncio.create_subprocess_exec(*command, stdout=self.log_handle, stderr=self.log_handle)
+                self.process = await asyncio.create_subprocess_exec(*command, stdout=self.log_handle, stderr=self.log_handle, cwd=folder)
                 await asyncio.sleep(1)
                 if self.process.returncode is not None:
                     raise RuntimeError("FFmpeg failed to start; inspect the job's ffmpeg.log")
@@ -401,3 +403,29 @@ async def retry(recording_id: str):
 @app.post("/demo", dependencies=[Depends(authorize)], status_code=202)
 async def demo():
     return await app.state.recorder.demo()
+
+
+def live_encoding_options(fps, max_seconds):
+    """Encode once to an archive and bounded HLS window, relative to the job cwd."""
+    return ["-crf", "23", "-pix_fmt", "yuv420p", "-tune", "zerolatency",
+            "-g", str(fps * 2), "-keyint_min", str(fps * 2), "-sc_threshold", "0",
+            "-flags", "+global_header", "-c:a", "aac", "-b:a", "192k",
+            "-af", "aresample=async=1:first_pts=0", "-t", str(max_seconds),
+            "-map", "0:v:0", "-map", "1:a:0", "-f", "tee",
+            "[f=matroska]raw.mkv|[f=hls:hls_time=2:hls_list_size=6:"
+            "hls_delete_threshold=3:hls_segment_type=fmp4:"
+            "hls_flags=delete_segments+independent_segments+temp_file]live/index.m3u8"]
+
+
+@app.get("/live/{recording_id}/{name}", dependencies=[Depends(authorize)])
+def live_media(recording_id: str, name: str):
+    recorder = app.state.recorder
+    if not recorder.active or recorder.active["id"] != recording_id or recorder.active["status"] != "recording":
+        raise HTTPException(404, "Stream is not live")
+    if not re.fullmatch(r"index\.m3u8|init\.mp4|index\d+\.m4s", name):
+        raise HTTPException(404, "Live resource not found")
+    path = recorder.folder(recording_id) / "live" / name
+    if not path.is_file():
+        raise HTTPException(404, "Live resource is not ready")
+    content_type = "application/vnd.apple.mpegurl" if name.endswith(".m3u8") else "video/mp4"
+    return FileResponse(path, media_type=content_type, headers={"Cache-Control": "no-store"})
