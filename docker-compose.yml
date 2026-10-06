@@ -67,6 +67,8 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      RECORDER_URL: http://capture:8000
+      RECORDER_API_KEY: ${RECORDER_API_KEY:?Set RECORDER_API_KEY}
     ports:
       - '${BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_PORT:-3000}:3000'
     depends_on:

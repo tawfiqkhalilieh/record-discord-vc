@@ -1,5 +1,18 @@
 {% extends 'base.html' %}
 {% block content %}
+<section class="panel live-panel" data-live-dashboard>
+  <p class="eyebrow">LIVE CALL</p>
+  <h2 id="live-title">Live stream</h2>
+  <p id="live-status" class="muted" role="status">Connecting to capture worker…</p>
+  <video id="live-video" controls autoplay muted playsinline hidden aria-label="Live voice call"></video>
+  <div id="obs-details" hidden>
+    <label for="obs-url">OBS Browser Source URL</label>
+    <input id="obs-url" type="text" readonly aria-label="OBS Browser Source URL">
+    <p class="muted">Add a Browser Source in OBS and paste this URL. Match the capture dimensions (1280 × 720 by default) and enable “Control audio via OBS”. This private link grants access to this call and expires when it ends. Preview starts muted; use the player controls to hear audio.</p>
+  </div>
+</section>
+<script src="/static/vendor/hls.min.js" defer></script>
+<script src="/static/live.js" defer></script>
 <p class="eyebrow">THE LIBRARY</p><h1>Recordings <span class="count">{{ recordings|length }}</span></h1>
 <p class="muted">Finished calls and shared moments. New videos appear after processing.</p>
 <div class="library">

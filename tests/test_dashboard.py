@@ -77,3 +77,73 @@ def test_tampered_cookie_rejected(client, published):
     client.cookies.clear()
     client.cookies.set("stash_session", cookie + "tampered")
     assert client.get("/api/recordings").status_code == 401
+
+
+@pytest.fixture
+def live_worker(client):
+    import httpx
+    from dashboard.app import app
+    state = {'id': 'e' * 32, 'status': 'recording', 'channel_name': 'Live call',
+             'participants': ['Alex'], 'started_at': '2026-10-06T12:00:00+00:00', 'requested_by': 'private'}
+    requests = []
+    def handle(request):
+        requests.append(request)
+        assert request.headers['authorization'] == 'Bearer test-recorder-key'
+        if request.url.path == '/state':
+            return httpx.Response(200, json=state)
+        if state['status'] != 'recording':
+            return httpx.Response(404)
+        if request.url.path.endswith('/index.m3u8'):
+            return httpx.Response(200, text='#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\nindex0.m4s\n')
+        return httpx.Response(200, content=b'live media')
+    original = app.state.recorder_http
+    app.state.recorder_http = httpx.AsyncClient(base_url='http://capture:8000',
+        headers={'Authorization': 'Bearer test-recorder-key'}, transport=httpx.MockTransport(handle))
+    yield state, requests
+    client.portal.call(app.state.recorder_http.aclose)
+    app.state.recorder_http = original
+
+
+def test_live_dashboard_and_obs_session_access(client, live_worker):
+    from urllib.parse import urlsplit, parse_qs
+    state, requests = live_worker
+    recording_id = state['id']
+    assert client.get('/api/live').status_code == 401
+    assert client.get(f'/live/{recording_id}/index.m3u8').status_code == 401
+    login(client)
+    assert 'OBS Browser Source URL' in client.get('/').text
+    result = client.get('/api/live').json()
+    assert result['channel_name'] == 'Live call' and 'requested_by' not in result
+    obs = urlsplit(result['obs_url'])
+    token = parse_qs(obs.query)['token'][0]
+    assert client.get(result['playlist_url']).status_code == 200
+    client.cookies.clear()
+    assert client.get(obs.path + '?' + obs.query).status_code == 200
+    playlist = client.get(f'/live/{recording_id}/index.m3u8?token={token}')
+    assert playlist.status_code == 200
+    assert f'URI="init.mp4?token={token}"' in playlist.text
+    assert f'index0.m4s?token={token}' in playlist.text
+    assert playlist.headers['cache-control'] == 'private, no-store'
+    assert client.get(f'/live/{recording_id}/index0.m4s?token={token}').content == b'live media'
+    assert client.get(f'/live/{recording_id}/state?token={token}').json()['status'] == 'recording'
+    assert client.get(f'/live/{recording_id}/raw.mkv?token={token}').status_code == 404
+    assert client.get(f'/live/{recording_id}/index.m3u8?token={token}bad').status_code == 401
+    assert client.get('/live/' + 'f' * 32 + f'/index.m3u8?token={token}').status_code == 401
+    assert client.get('/api/recordings').status_code == 401
+    state['status'] = 'processing'
+    assert client.get(obs.path + '?' + obs.query).status_code == 404
+    assert client.get(f'/live/{recording_id}/index.m3u8?token={token}').status_code == 404
+    state['id'] = 'f' * 32
+    state['status'] = 'recording'
+    assert client.get(f'/live/{recording_id}/state?token={token}').json()['status'] == 'idle'
+
+
+def test_live_worker_outage_is_reported(client, live_worker):
+    import httpx
+    from dashboard.app import app
+    login(client)
+    def offline(request):
+        raise httpx.ConnectError('offline', request=request)
+    app.state.recorder_http._transport = httpx.MockTransport(offline)
+    response = client.get('/api/live')
+    assert response.status_code == 503 and response.json()['detail'] == 'Capture worker unavailable'

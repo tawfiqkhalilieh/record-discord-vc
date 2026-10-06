@@ -85,3 +85,62 @@ def test_failed_job_retains_media_and_retry_releases_worker(recorder_client, mon
     assert recorder.load(session["id"])["status"] == "complete"
     assert "error" not in recorder.load(session["id"])
     assert recorder.active is None
+
+
+def test_live_files_require_auth_and_active_session(recorder_client):
+    client, recorder = recorder_client
+    recording_id = 'e' * 32
+    recorder.active = {'id': recording_id, 'status': 'recording'}
+    folder = recorder.folder(recording_id) / 'live'
+    folder.mkdir(parents=True)
+    (folder / 'index.m3u8').write_text('#EXTM3U\nindex0.m4s\n')
+    (folder / 'index0.m4s').write_bytes(b'segment')
+    path = f'/live/{recording_id}'
+    assert client.get(path + '/index.m3u8').status_code == 401
+    response = client.get(path + '/index.m3u8', headers=AUTH)
+    assert response.status_code == 200 and response.headers['cache-control'] == 'no-store'
+    assert client.get(path + '/index0.m4s', headers=AUTH).content == b'segment'
+    for name in ['session.json', 'raw.mkv', 'index0.m4s.tmp', 'missing.m4s']:
+        assert client.get(path + '/' + name, headers=AUTH).status_code == 404
+    assert client.get('/live/' + 'f' * 32 + '/index.m3u8', headers=AUTH).status_code == 404
+    recorder.active['status'] = 'processing'
+    assert client.get(path + '/index.m3u8', headers=AUTH).status_code == 404
+
+
+def test_ffmpeg_publishes_live_media_before_capture_ends(tmp_path):
+    import signal
+    import subprocess
+    import time
+    from capture.app import live_encoding_options
+    from pipeline.composite import finalize, probe
+
+    (tmp_path / 'live').mkdir()
+    command = ['ffmpeg', '-y', '-v', 'error', '-re', '-f', 'lavfi', '-i',
+               'testsrc2=size=320x180:rate=15', '-f', 'lavfi', '-i',
+               'sine=frequency=440:sample_rate=48000', '-c:v', 'libx264', '-preset', 'ultrafast',
+               *live_encoding_options(15, 30)]
+    process = subprocess.Popen(command, cwd=tmp_path, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 12
+        playlist = tmp_path / 'live/index.m3u8'
+        while not playlist.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(.1)
+        assert process.poll() is None, process.stderr.read().decode() if process.poll() is not None else ''
+        assert playlist.exists(), 'No playlist published while capture was running'
+        content = playlist.read_text()
+        assert '#EXT-X-ENDLIST' not in content and '#EXT-X-INDEPENDENT-SEGMENTS' in content
+        assert (tmp_path / 'live/init.mp4').stat().st_size > 0
+        assert (tmp_path / 'live/index0.m4s').stat().st_size > 0
+        # A live segment must contain playable audio and video before the archive is closed.
+        info = probe(playlist)
+        assert {s['codec_name'] for s in info['streams']} == {'h264', 'aac'}
+    finally:
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+    finalize(tmp_path / 'raw.mkv', tmp_path / 'video.mp4')
+    assert float(probe(tmp_path / 'video.mp4')['format']['duration']) >= 2

@@ -9,6 +9,10 @@ from threading import Lock
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlencode
+
+import httpx
+from itsdangerous import BadSignature, URLSafeSerializer
 
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -34,7 +38,13 @@ async def lifespan(app):
         raise RuntimeError("Set a unique ADMIN_PASSWORD (12+ characters) and SESSION_SECRET (32+ characters)")
     app.state.storage = Storage()
     app.state.storage.check()
-    yield
+    async with httpx.AsyncClient(
+        base_url=os.environ.get("RECORDER_URL", "http://capture:8000"),
+        headers={"Authorization": f"Bearer {os.environ.get('RECORDER_API_KEY', '')}"},
+        timeout=5,
+    ) as recorder_http:
+        app.state.recorder_http = recorder_http
+        yield
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -49,8 +59,8 @@ async def security_headers(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "same-origin"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; media-src 'self'; form-action 'self'; frame-ancestors 'none'"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self'; media-src 'self' blob:; form-action 'self'; frame-ancestors 'none'"
     if not request.url.path.startswith("/static/"):
         response.headers["Cache-Control"] = "private, no-store"
     return response
@@ -216,3 +226,78 @@ def video(request: Request, recording_id: str, download: bool = False):
             body.close()
 
     return StreamingResponse(chunks(), status_code=status, headers=headers)
+
+
+def live_signer():
+    return URLSafeSerializer(os.environ["SESSION_SECRET"], salt="obs-live-session")
+
+
+def live_access(request, recording_id, token):
+    try:
+        validate_id(recording_id)
+    except ValueError:
+        raise HTTPException(404, "Stream not found")
+    if token:
+        try:
+            if live_signer().loads(token) == recording_id:
+                return
+        except BadSignature:
+            pass
+        raise HTTPException(401, "Invalid stream token")
+    if not request.session.get("admin"):
+        raise HTTPException(401, "Admin login or stream token required")
+
+
+async def recorder_get(request, path):
+    try:
+        response = await request.app.state.recorder_http.get(path)
+    except httpx.RequestError:
+        raise HTTPException(503, "Capture worker unavailable")
+    if response.status_code != 200:
+        status = 404 if response.status_code == 404 else 503
+        raise HTTPException(status, "Live resource not ready" if status == 404 else "Capture worker unavailable")
+    return response
+
+
+@app.get("/api/live", dependencies=[Depends(admin)])
+async def live_state(request: Request):
+    session = (await recorder_get(request, "/state")).json()
+    result = {key: session[key] for key in ("status", "id", "channel_name", "participants", "started_at") if key in session}
+    if session["status"] == "recording":
+        recording_id = validate_id(session["id"])
+        result["playlist_url"] = f"/live/{recording_id}/index.m3u8"
+        base = os.environ.get("PUBLIC_BASE_URL", "http://localhost:3000").rstrip("/")
+        result["obs_url"] = f"{base}/obs/{recording_id}?" + urlencode({"token": live_signer().dumps(recording_id)})
+    return result
+
+
+@app.get("/live/{recording_id}/state")
+async def stream_state(request: Request, recording_id: str, token: str = ""):
+    live_access(request, recording_id, token)
+    session = (await recorder_get(request, "/state")).json()
+    return {"status": session["status"] if session.get("id") == recording_id else "idle"}
+
+
+@app.get("/live/{recording_id}/{name}")
+async def live_video(request: Request, recording_id: str, name: str, token: str = ""):
+    live_access(request, recording_id, token)
+    if not re.fullmatch(r"index\.m3u8|init\.mp4|index\d+\.m4s", name):
+        raise HTTPException(404, "Live resource not found")
+    upstream = await recorder_get(request, f"/live/{recording_id}/{name}")
+    content = upstream.content
+    if name == "index.m3u8":
+        query = "?" + urlencode({"token": token}) if token else ""
+        # Rewrite only the known local resources, including EXT-X-MAP's init URI.
+        content = re.sub(r'(?m)^(index\d+\.m4s)$', lambda m: m[1] + query, upstream.text)
+        content = content.replace('URI="init.mp4"', f'URI="init.mp4{query}"')
+    content_type = "application/vnd.apple.mpegurl" if name.endswith(".m3u8") else "video/mp4"
+    return Response(content, media_type=content_type)
+
+
+@app.get("/obs/{recording_id}")
+async def obs(request: Request, recording_id: str, token: str = ""):
+    live_access(request, recording_id, token)
+    session = (await recorder_get(request, "/state")).json()
+    if session.get("id") != recording_id or session["status"] != "recording":
+        raise HTTPException(404, "Stream is not live")
+    return templates.TemplateResponse(request=request, name="obs.html", context={"recording_id": recording_id})
