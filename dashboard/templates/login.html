@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+{% block content %}
+<section class="login panel">
+  <p class="eyebrow">ADMIN ACCESS</p><h1>Your calls, kept together.</h1>
+  <p class="muted">Enter the admin password to browse and play recordings.</p>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form action="/login" method="post">
+    <input type="hidden" name="token" value="{{ csrf }}">
+    <label for="password">Admin password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button>Open stash</button>
+  </form>
+</section>
+{% endblock %}
